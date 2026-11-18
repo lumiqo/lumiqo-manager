@@ -25,6 +25,7 @@ const usage = `Usage: lumiqo-manager <command> [options]
   tools list [--json]    Report which supported tools are installed
   worker status          Report the Worker systemd unit
   setup [--plan|--apply]        Check prerequisites, optionally install missing apt packages
+  setup --apply --worker Install the pinned Worker and register its service
   auth                   Report sign-in state for supported CLI tools
   auth --login TOOL      Start interactive sign-in (gh, ntn, gcloud, codex)
   services [--user]      Report the Worker systemd unit
@@ -150,9 +151,9 @@ func interactive(stdin io.Reader, stdout, stderr io.Writer, name string, args ..
 	return cmd.Run()
 }
 
-func missingPackages() []string {
+func missingPackages(extra ...string) []string {
 	missing := []string{}
-	for _, pkg := range packages {
+	for _, pkg := range append(append([]string{}, packages...), extra...) {
 		output, err := probe("dpkg-query", "-W", "-f=${Status}", pkg)
 		if err != nil || string(output) != "install ok installed" {
 			missing = append(missing, pkg)
@@ -161,12 +162,12 @@ func missingPackages() []string {
 	return missing
 }
 
-func setup(apply bool, stdin io.Reader, stderr io.Writer) (any, error) {
+func setup(apply bool, stdin io.Reader, stderr io.Writer, extra ...string) (any, error) {
 	info := host()
 	if info.Distro != "ubuntu" || info.Release != "24.04" {
 		return nil, errors.New("setup requires Ubuntu 24.04")
 	}
-	missing := missingPackages()
+	missing := missingPackages(extra...)
 	if apply && len(missing) > 0 {
 		command := "apt-get"
 		var prefix []string
@@ -179,7 +180,7 @@ func setup(apply bool, stdin io.Reader, stderr io.Writer) (any, error) {
 				return nil, fmt.Errorf("apt-get %s: %w", args[0], err)
 			}
 		}
-		missing = missingPackages()
+		missing = missingPackages(extra...)
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("packages still missing: %s", strings.Join(missing, ", "))
 		}
@@ -230,13 +231,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		flags.Bool("json", false, "emit JSON (default)")
 	}
 	var unit, login string
-	var apply, plan, user bool
+	var apply, plan, user, installWorker bool
 	switch command {
 	case "status", "services", "doctor", "worker":
 		flags.StringVar(&unit, "unit", "lumiqo-worker.service", "Worker systemd unit")
 		flags.BoolVar(&user, "user", false, "query the user systemd manager")
 	case "tools":
 	case "setup":
+		flags.BoolVar(&installWorker, "worker", false, "provision the pinned Worker release (requires --apply)")
 		flags.BoolVar(&plan, "plan", false, "report missing apt packages without installing")
 		flags.BoolVar(&apply, "apply", false, "install missing apt packages")
 	case "auth":
@@ -258,7 +260,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var result any
 	switch command {
 	case "status":
-		result = map[string]any{"version": version, "system": host(), "tools": installedTools(), "worker": worker(unit, user)}
+		result = map[string]any{"version": version, "system": host(), "tools": installedTools(), "worker": worker(unit, user), "worker_configured": workerConfigured()}
 	case "services", "worker":
 		result = worker(unit, user)
 	case "doctor":
@@ -268,6 +270,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "setup":
 		if plan && apply {
 			return errors.New("--plan and --apply are mutually exclusive")
+		}
+		if installWorker {
+			if !apply {
+				return errors.New("--worker requires --apply")
+			}
+			report, err := provisionWorker(stdin, stderr)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(stdout).Encode(report)
 		}
 		report, err := setup(apply, stdin, stderr)
 		if err != nil {
