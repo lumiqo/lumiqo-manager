@@ -21,7 +21,10 @@ var version = "dev"
 const usage = `Usage: lumiqo-manager <command> [options]
 
   status                 Report OS, WSL, tools and Worker state
-  setup [--apply]        Check prerequisites, optionally install missing apt packages
+  doctor [--json]        Check Ubuntu, systemd and setup prerequisites
+  tools list [--json]    Report which supported tools are installed
+  worker status          Report the Worker systemd unit
+  setup [--plan|--apply]        Check prerequisites, optionally install missing apt packages
   auth                   Report sign-in state for supported CLI tools
   auth --login TOOL      Start interactive sign-in (gh, ntn, gcloud, codex)
   services [--user]      Report the Worker systemd unit
@@ -184,21 +187,57 @@ func setup(apply bool, stdin io.Reader, stderr io.Writer) (any, error) {
 	return map[string]any{"system": info, "applied": apply, "missing_packages": missing}, nil
 }
 
+func installedTools() map[string]bool {
+	tools := map[string]bool{}
+	for _, name := range []string{"git", "gh", "ntn", "gcloud", "codex", "mise", "uv", "docker"} {
+		tools[name] = installed(name)
+	}
+	return tools
+}
+
+func doctor(unit string, user bool) any {
+	info := host()
+	systemd, err := os.ReadFile("/proc/1/comm")
+	return map[string]any{
+		"system":           info,
+		"supported_ubuntu": info.Distro == "ubuntu" && info.Release == "24.04",
+		"systemd":          err == nil && strings.TrimSpace(string(systemd)) == "systemd",
+		"missing_packages": missingPackages(),
+		"tools":            installedTools(),
+		"worker":           worker(unit, user),
+	}
+}
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		_, err := fmt.Fprint(stdout, usage)
 		return err
 	}
 	command := args[0]
+	options := args[1:]
+	switch command {
+	case "tools", "worker":
+		subcommand := map[string]string{"tools": "list", "worker": "status"}[command]
+		if len(options) == 0 || options[0] != subcommand {
+			return fmt.Errorf("expected %s %s", command, subcommand)
+		}
+		options = options[1:]
+	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	var unit, login string
-	var apply, user bool
 	switch command {
-	case "status", "services":
+	case "status", "services", "doctor", "worker", "tools", "setup":
+		flags.Bool("json", false, "emit JSON (default)")
+	}
+	var unit, login string
+	var apply, plan, user bool
+	switch command {
+	case "status", "services", "doctor", "worker":
 		flags.StringVar(&unit, "unit", "lumiqo-worker.service", "Worker systemd unit")
 		flags.BoolVar(&user, "user", false, "query the user systemd manager")
+	case "tools":
 	case "setup":
+		flags.BoolVar(&plan, "plan", false, "report missing apt packages without installing")
 		flags.BoolVar(&apply, "apply", false, "install missing apt packages")
 	case "auth":
 		flags.StringVar(&login, "login", "", "start interactive sign-in for TOOL")
@@ -206,7 +245,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(options); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -219,14 +258,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var result any
 	switch command {
 	case "status":
-		tools := map[string]bool{}
-		for _, name := range []string{"git", "gh", "ntn", "gcloud", "codex", "mise", "uv", "docker"} {
-			tools[name] = installed(name)
-		}
-		result = map[string]any{"version": version, "system": host(), "tools": tools, "worker": worker(unit, user)}
-	case "services":
+		result = map[string]any{"version": version, "system": host(), "tools": installedTools(), "worker": worker(unit, user)}
+	case "services", "worker":
 		result = worker(unit, user)
+	case "doctor":
+		result = doctor(unit, user)
+	case "tools":
+		result = installedTools()
 	case "setup":
+		if plan && apply {
+			return errors.New("--plan and --apply are mutually exclusive")
+		}
 		report, err := setup(apply, stdin, stderr)
 		if err != nil {
 			return err
