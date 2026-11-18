@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -79,6 +80,9 @@ func provisionWorker(stdin io.Reader, stderr io.Writer) (any, error) {
 			return nil, err
 		}
 	} else if err != nil {
+		return nil, err
+	}
+	if err := makeWorkerReadable(filepath.Join(workerRoot, target)); err != nil {
 		return nil, err
 	}
 	for _, binary := range []string{"bin/lumiqot", "libexec/lumiqot/lumiqo-worker"} {
@@ -161,5 +165,25 @@ func stageWorker(temp string) error {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extract Worker: %w: %s", err, output)
 	}
-	return nil
+	return makeWorkerReadable(payload)
+}
+
+func makeWorkerReadable(root string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && !entry.Type().IsRegular() {
+			return fmt.Errorf("unexpected entry in Worker payload: %s", path)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		mode := fs.FileMode(0644)
+		if entry.IsDir() || relative == "bin/lumiqot" || relative == "libexec/lumiqot/lumiqo-worker" {
+			mode = 0755
+		}
+		return os.Chmod(path, mode)
+	})
 }
