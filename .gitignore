@@ -1,0 +1,10 @@
+/dist/
+/lumiqo-manager
+
+# Local documentation
+*.md
+*.rst
+*.adoc
+/docs/
+/doc/
+/documents/
