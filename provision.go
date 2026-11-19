@@ -7,24 +7,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"syscall"
-	"time"
+	"strings"
 )
 
-const workerTag = "v0.1.0"
+const workerRepo = "lumiqo-worker"
 const workerRoot = "/opt/lumiqo/worker"
 const workerConfig = "/home/lumiqo/.config/lumiqo/worker.json"
 const workerUnit = "lumiqo-worker.service"
-
-var workerHashes = map[string]string{
-	"amd64": "f2a2baa6ecc764343d47fd1abaee0d4d06ac1fd97bfedb10eb5df715c3ef5a84",
-	"arm64": "874d84779258f599c9681aee92e1b9c1df8679ec1f6dc25acd815a26bf794d20",
-}
 
 const unitContents = `[Unit]
 Description=Lumiqo Worker
@@ -36,7 +28,7 @@ ConditionPathExists=/home/lumiqo/.config/lumiqo/worker.json
 User=lumiqo
 WorkingDirectory=/home/lumiqo
 StateDirectory=lumiqo-worker
-Environment=PATH=/home/lumiqo/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=` + environmentBin + `:/home/lumiqo/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/opt/lumiqo/worker/current/libexec/lumiqot/lumiqo-worker -config /home/lumiqo/.config/lumiqo/worker.json -mode poll
 Restart=on-failure
 RestartSec=10s
@@ -45,81 +37,145 @@ RestartSec=10s
 WantedBy=multi-user.target
 `
 
-func provisionWorker(stdin io.Reader, stderr io.Writer) (any, error) {
-	if os.Geteuid() != 0 || os.Getenv("WSL_DISTRO_NAME") != "Lumiqo" {
-		return nil, errors.New("Worker provisioning requires root in the Lumiqo WSL distribution")
+func validateWorkerHost(installed bool) error {
+	_, managed := os.Stat("/etc/lumiqo/winapp-managed")
+	if os.Geteuid() != 0 || (os.Getenv("WSL_DISTRO_NAME") != "Lumiqo" && !(host().WSL && (managed == nil || installed))) {
+		return errors.New("Worker provisioning requires root in the Lumiqo WSL distribution")
 	}
 	if err := exec.Command("id", "-u", "lumiqo").Run(); err != nil {
-		return nil, fmt.Errorf("Lumiqo user is missing: %w", err)
+		return fmt.Errorf("Lumiqo user is missing: %w", err)
 	}
-	if err := os.MkdirAll(workerRoot+"/versions", 0755); err != nil {
-		return nil, err
+	return nil
+}
+
+func installWorkerService(root string, release workerRelease, current string, configure bool, state service, stdin io.Reader, stderr io.Writer) error {
+	for _, dir := range []string{filepath.Dir(root), root, root + "/versions"} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0755); err != nil {
+			return err
+		}
 	}
-	lock, err := os.OpenFile(workerRoot+"/.setup.lock", os.O_CREATE|os.O_RDWR, 0600)
+	temp, err := os.MkdirTemp(root, ".setup-")
 	if err != nil {
-		return nil, err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return nil, err
-	}
-	if _, err := setup(true, stdin, stderr, "bubblewrap", "gh"); err != nil {
-		return nil, err
-	}
-	target := "versions/" + workerTag
-	temp, err := os.MkdirTemp(workerRoot, ".setup-")
-	if err != nil {
-		return nil, err
+		return err
 	}
 	defer os.RemoveAll(temp)
-	if _, err := os.Stat(filepath.Join(workerRoot, target)); errors.Is(err, os.ErrNotExist) {
-		if err := stageWorker(temp); err != nil {
-			return nil, err
+
+	target := "versions/" + release.tag
+	destination := filepath.Join(root, target)
+	repairPayload := !workerPayloadReady(destination)
+	if repairPayload {
+		if err := stageWorker(temp, release); err != nil {
+			return err
 		}
-		if err := os.Rename(filepath.Join(temp, "payload"), filepath.Join(workerRoot, target)); err != nil {
-			return nil, err
+		previous := filepath.Join(temp, "previous")
+		if err := os.Rename(destination, previous); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-	} else if err != nil {
-		return nil, err
-	}
-	if err := makeWorkerReadable(filepath.Join(workerRoot, target)); err != nil {
-		return nil, err
-	}
-	for _, binary := range []string{"bin/lumiqot", "libexec/lumiqot/lumiqo-worker"} {
-		info, err := os.Stat(filepath.Join(workerRoot, target, binary))
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-			return nil, fmt.Errorf("Worker version directory contains no executable %s", binary)
+		if err := os.Rename(filepath.Join(temp, "payload"), destination); err != nil {
+			if restoreErr := os.Rename(previous, destination); restoreErr != nil && !errors.Is(restoreErr, os.ErrNotExist) {
+				return errors.Join(err, restoreErr)
+			}
+			return err
 		}
 	}
-	if err := os.Symlink(target, filepath.Join(temp, "current")); err != nil {
-		return nil, err
+	if configure && state.Load == "not-found" {
+		if err := installWorkerUnit("/etc/systemd/system/" + workerUnit); err != nil {
+			return err
+		}
 	}
-	if err := os.Rename(filepath.Join(temp, "current"), workerRoot+"/current"); err != nil {
-		return nil, err
+
+	changed := current != target
+	link := root + "/current"
+	publish := func(version string) error {
+		pending := filepath.Join(temp, "current")
+		if err := os.Symlink(version, pending); err != nil {
+			return err
+		}
+		return os.Rename(pending, link)
 	}
-	unitPath := "/etc/systemd/system/" + workerUnit
-	unitFile, err := os.CreateTemp(filepath.Dir(unitPath), ".lumiqo-worker-")
-	if err != nil {
-		return nil, err
+	if changed {
+		if err := publish(target); err != nil {
+			return err
+		}
 	}
-	defer os.Remove(unitFile.Name())
-	writeErr := os.WriteFile(unitFile.Name(), []byte(unitContents), 0644)
-	closeErr := unitFile.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(unitFile.Name(), 0644); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(unitFile.Name(), unitPath); err != nil {
-		return nil, err
-	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "--now", workerUnit}} {
+
+	systemctl := func(args ...string) error {
 		if err := interactive(stdin, stderr, stderr, "systemctl", args...); err != nil {
-			return nil, fmt.Errorf("systemctl %s: %w", args[0], err)
+			return fmt.Errorf("systemctl %s: %w", args[0], err)
+		}
+		return nil
+	}
+	err = applyWorkerService(configure, state.Active == "active" && (changed || repairPayload || workerNeedsRestart(state, release.tag)), systemctl)
+	if err == nil || !changed {
+		return err
+	}
+	if current == "" {
+		return errors.Join(err, os.Remove(link))
+	}
+	if rollbackErr := publish(current); rollbackErr != nil {
+		return errors.Join(err, rollbackErr)
+	}
+	if state.Active == "active" {
+		return errors.Join(err, systemctl("start", workerUnit))
+	}
+	return err
+}
+
+// A previous update may have published current before it could restart the service.
+func workerNeedsRestart(state service, tag string) bool {
+	if state.Active != "active" || state.MainPID <= 0 {
+		return false
+	}
+	running, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.MainPID))
+	return err == nil && strings.HasPrefix(running, workerRoot+"/versions/") &&
+		running != filepath.Join(workerRoot, "versions", tag, "libexec/lumiqot/lumiqo-worker")
+}
+
+func applyWorkerService(configure, restart bool, systemctl func(...string) error) error {
+	if configure {
+		if err := systemctl("daemon-reload"); err != nil {
+			return err
+		}
+		if err := systemctl("enable", "--now", workerUnit); err != nil {
+			return err
 		}
 	}
-	return map[string]any{"worker": worker(workerUnit, false), "worker_configured": workerConfigured()}, nil
+	if restart {
+		return systemctl("try-restart", workerUnit)
+	}
+	return nil
+}
+
+func workerPayloadReady(root string) bool {
+	for _, binary := range []string{"bin/lumiqot", "libexec/lumiqot/lumiqo-worker"} {
+		info, err := os.Stat(filepath.Join(root, binary))
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func installWorkerUnit(path string) error {
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".lumiqo-worker-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := io.WriteString(file, unitContents)
+	if err := errors.Join(writeErr, file.Chmod(0644), file.Close()); err != nil {
+		return err
+	}
+	if err := os.Link(file.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
 }
 
 func workerConfigured() bool {
@@ -127,34 +183,30 @@ func workerConfigured() bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func stageWorker(temp string) error {
-	digest, ok := workerHashes[runtime.GOARCH]
-	if !ok {
-		return fmt.Errorf("unsupported Worker architecture %s", runtime.GOARCH)
-	}
-	name := "lumiqot-linux-" + workerTag + "-linux-" + runtime.GOARCH
-	url := "https://github.com/lumiqo/lumiqot-linux/releases/download/" + workerTag + "/" + name + ".tar.gz"
-	client := &http.Client{Timeout: 2 * time.Minute}
-	response, err := client.Get(url)
+func stageWorker(temp string, release workerRelease) error {
+	digest, err := release.checksum()
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download Worker: %s", response.Status)
+	name := release.archiveName()
+	response, err := release.openAsset(name + ".tar.gz")
+	if err != nil {
+		return err
 	}
+	defer response.Close()
 	archive := filepath.Join(temp, "worker.tar.gz")
 	file, err := os.Create(archive)
 	if err != nil {
 		return err
 	}
 	hash := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, 32<<20))
+	const maxArchive = 32 << 20
+	size, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response, maxArchive+1))
 	if err := errors.Join(copyErr, file.Close()); err != nil {
 		return err
 	}
-	if hex.EncodeToString(hash.Sum(nil)) != digest {
-		return errors.New("Worker archive SHA-256 mismatch")
+	if size > maxArchive || hex.EncodeToString(hash.Sum(nil)) != digest {
+		return errors.New("Worker archive size or SHA-256 mismatch")
 	}
 	payload := filepath.Join(temp, "payload")
 	if err := os.Mkdir(payload, 0755); err != nil {
@@ -165,7 +217,14 @@ func stageWorker(temp string) error {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("extract Worker: %w: %s", err, output)
 	}
-	return makeWorkerReadable(payload)
+	if err := makeWorkerReadable(payload); err != nil {
+		return err
+	}
+	output, err := probe(filepath.Join(payload, "bin/lumiqot"), "version")
+	if err != nil || string(output) != release.tag+"\n" || !workerPayloadReady(payload) {
+		return fmt.Errorf("Worker payload does not report release %s or is incomplete", release.tag)
+	}
+	return nil
 }
 
 func makeWorkerReadable(root string) error {

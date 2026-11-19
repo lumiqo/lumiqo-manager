@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +26,10 @@ const usage = `Usage: lumiqo-manager <command> [options]
   tools list [--json]    Report which supported tools are installed
   worker status          Report the Worker systemd unit
   setup [--plan|--apply]        Check prerequisites, optionally install missing apt packages
-  setup --apply --worker Install the pinned Worker and register its service
+  install REPO           Install an optional component (lumiqo-worker)
+  reconcile --plan       Report environment differences as JSON
+  reconcile --apply [--restore]
+                         Repair the environment and update installed components
   auth                   Report sign-in state for supported CLI tools
   auth --login TOOL      Start interactive sign-in (gh, ntn, gcloud, codex)
   services [--user]      Report the Worker systemd unit
@@ -43,12 +47,14 @@ type systemInfo struct {
 }
 
 type service struct {
-	Unit   string `json:"unit"`
-	Scope  string `json:"scope"`
-	Load   string `json:"load"`
-	Active string `json:"active"`
-	Sub    string `json:"sub"`
-	Error  string `json:"error,omitempty"`
+	Unit          string `json:"unit"`
+	Scope         string `json:"scope"`
+	Load          string `json:"load"`
+	Active        string `json:"active"`
+	Sub           string `json:"sub"`
+	UnitFileState string `json:"-"`
+	MainPID       int    `json:"-"`
+	Error         string `json:"error,omitempty"`
 }
 
 type tool struct {
@@ -64,7 +70,13 @@ var authTools = []tool{
 	{"codex", []string{"login", "status"}, []string{"login"}},
 }
 
-var packages = []string{"ca-certificates", "curl", "git", "jq", "unzip"}
+var packages = []string{
+	"7zip", "bat", "build-essential", "ca-certificates", "csvkit", "curl",
+	"fd-find", "ffmpeg", "file", "gh", "git", "git-lfs", "gpg", "imagemagick",
+	"jq", "libimage-exiftool-perl", "miller", "pandoc", "poppler-utils",
+	"python3", "python3-venv", "ripgrep", "rsync", "shellcheck", "sqlite3",
+	"tar", "tree", "unzip", "wget", "yq", "zstd",
+}
 
 func host() systemInfo {
 	info := systemInfo{OS: runtime.GOOS, Arch: runtime.GOARCH}
@@ -107,7 +119,7 @@ func worker(unit string, user bool) service {
 		args = append(args, "--user")
 		state.Scope = "user"
 	}
-	args = append(args, "show", "--property=LoadState,ActiveState,SubState", "--", unit)
+	args = append(args, "show", "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID", "--", unit)
 	output, err := probe("systemctl", args...)
 	for _, line := range strings.Split(string(output), "\n") {
 		key, value, _ := strings.Cut(line, "=")
@@ -116,6 +128,10 @@ func worker(unit string, user bool) service {
 			state.Load = value
 		case "ActiveState":
 			state.Active = value
+		case "MainPID":
+			state.MainPID, _ = strconv.Atoi(value)
+		case "UnitFileState":
+			state.UnitFileState = value
 		case "SubState":
 			state.Sub = value
 		}
@@ -152,10 +168,14 @@ func interactive(stdin io.Reader, stdout, stderr io.Writer, name string, args ..
 }
 
 func missingPackages(extra ...string) []string {
+	return missingAptPackages(append(append([]string{}, packages...), extra...))
+}
+
+func missingAptPackages(requested []string) []string {
 	missing := []string{}
-	for _, pkg := range append(append([]string{}, packages...), extra...) {
+	for _, pkg := range requested {
 		output, err := probe("dpkg-query", "-W", "-f=${Status}", pkg)
-		if err != nil || string(output) != "install ok installed" {
+		if err != nil || !strings.HasSuffix(string(output), " ok installed") {
 			missing = append(missing, pkg)
 		}
 	}
@@ -190,7 +210,7 @@ func setup(apply bool, stdin io.Reader, stderr io.Writer, extra ...string) (any,
 
 func installedTools() map[string]bool {
 	tools := map[string]bool{}
-	for _, name := range []string{"git", "gh", "ntn", "gcloud", "codex", "mise", "uv", "docker"} {
+	for _, name := range []string{"git", "gh", "ntn", "gcloud", "codex", "mise", "uv", "docker", "node", "npm", "duckdb", "python-analysis"} {
 		tools[name] = installed(name)
 	}
 	return tools
@@ -206,6 +226,7 @@ func doctor(unit string, user bool) any {
 		"missing_packages": missingPackages(),
 		"tools":            installedTools(),
 		"worker":           worker(unit, user),
+		"environment":      environmentHealth(),
 	}
 }
 
@@ -231,18 +252,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		flags.Bool("json", false, "emit JSON (default)")
 	}
 	var unit, login string
-	var apply, plan, user, installWorker bool
+	var apply, plan, user, restore bool
 	switch command {
 	case "status", "services", "doctor", "worker":
 		flags.StringVar(&unit, "unit", "lumiqo-worker.service", "Worker systemd unit")
 		flags.BoolVar(&user, "user", false, "query the user systemd manager")
 	case "tools":
 	case "setup":
-		flags.BoolVar(&installWorker, "worker", false, "provision the pinned Worker release (requires --apply)")
 		flags.BoolVar(&plan, "plan", false, "report missing apt packages without installing")
 		flags.BoolVar(&apply, "apply", false, "install missing apt packages")
+	case "reconcile":
+		flags.BoolVar(&plan, "plan", false, "report differences without changing the environment")
+		flags.BoolVar(&apply, "apply", false, "apply differences")
+		flags.BoolVar(&restore, "restore", false, "also reinstall previously installed recommended components")
 	case "auth":
 		flags.StringVar(&login, "login", "", "start interactive sign-in for TOOL")
+	case "install":
+		flags.Usage = func() { fmt.Fprintln(stderr, "Usage: lumiqo-manager install REPO (supported: lumiqo-worker)") }
 	case "version":
 	default:
 		return fmt.Errorf("unknown command %q", command)
@@ -252,6 +278,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return nil
 		}
 		return err
+	}
+	if command == "install" {
+		if flags.NArg() != 1 {
+			return errors.New("expected install REPO (supported: lumiqo-worker)")
+		}
+		report, err := installOptional(flags.Arg(0), stdin, stderr)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(report)
 	}
 	if flags.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
@@ -267,19 +303,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		result = doctor(unit, user)
 	case "tools":
 		result = installedTools()
+	case "reconcile":
+		if plan == apply || (restore && !apply) {
+			return errors.New("specify exactly one of --plan and --apply; --restore requires --apply")
+		}
+		report, err := reconcile(apply, restore, "", stdin, stderr)
+		if err != nil {
+			return err
+		}
+		result = report
 	case "setup":
 		if plan && apply {
 			return errors.New("--plan and --apply are mutually exclusive")
-		}
-		if installWorker {
-			if !apply {
-				return errors.New("--worker requires --apply")
-			}
-			report, err := provisionWorker(stdin, stderr)
-			if err != nil {
-				return err
-			}
-			return json.NewEncoder(stdout).Encode(report)
 		}
 		report, err := setup(apply, stdin, stderr)
 		if err != nil {

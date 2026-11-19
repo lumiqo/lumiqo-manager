@@ -1,0 +1,20 @@
+[project]
+name = "lumiqo-analysis"
+version = "0.1.0"
+requires-python = "==3.13.*"
+dependencies = [
+    "beautifulsoup4",
+    "duckdb==1.4.5",
+    "matplotlib",
+    "numpy",
+    "openpyxl",
+    "pandas",
+    "polars",
+    "pyarrow",
+    "requests",
+    "scipy",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')"]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'", "sys_platform == 'linux' and platform_machine == 'aarch64'"]
