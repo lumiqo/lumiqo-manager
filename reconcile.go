@@ -59,11 +59,12 @@ type reconcileReport struct {
 func reconcile(apply, restore bool, repo string, stdin io.Reader, stderr io.Writer) (reconcileReport, error) {
 	run := func(history installedComponents, save func() error) (reconcileReport, error) {
 		aptMissing := missingPackages()
+		aptReady := len(aptMissing) == 0 && githubCLIReady()
 		_, envErr := os.Stat(environmentRoot + "/current")
 		envReady := managedEnvironmentReady()
 		hushLogin, hushErr := os.Stat(hushLoginPath)
 		components := []component{
-			{name: "apt", policy: "required", present: len(aptMissing) == 0, ready: len(aptMissing) == 0, missingPackages: aptMissing, install: func() error {
+			{name: "apt", policy: "required", present: len(aptMissing) == 0, ready: aptReady, missingPackages: aptMissing, install: func() error {
 				_, err := setup(true, stdin, stderr)
 				return err
 			}},

@@ -60,7 +60,7 @@ var authTools = []tool{
 
 var packages = []string{
 	"7zip", "bat", "bubblewrap", "build-essential", "ca-certificates", "csvkit", "curl",
-	"fd-find", "ffmpeg", "file", "gh", "git", "git-lfs", "gpg", "imagemagick",
+	"fd-find", "ffmpeg", "file", "git", "git-lfs", "gpg", "imagemagick",
 	"jq", "libimage-exiftool-perl", "miller", "pandoc", "poppler-utils",
 	"python3", "python3-venv", "ripgrep", "rsync", "shellcheck", "sqlite3",
 	"tar", "tree", "unzip", "wget", "yq", "zstd",
@@ -163,7 +163,14 @@ func setup(apply bool, stdin io.Reader, stderr io.Writer, extra ...string) (any,
 			return nil, fmt.Errorf("packages still missing: %s", strings.Join(missing, ", "))
 		}
 	}
-	return map[string]any{"system": info, "applied": apply, "missing_packages": missing}, nil
+	ghReady := githubCLIReady()
+	if apply && !ghReady {
+		if err := installGitHubCLI(stdin, stderr); err != nil {
+			return nil, err
+		}
+		ghReady = true
+	}
+	return map[string]any{"system": info, "applied": apply, "missing_packages": missing, "github_cli_ready": ghReady}, nil
 }
 
 func installedTools() map[string]bool {

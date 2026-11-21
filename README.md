@@ -28,6 +28,11 @@ its saved preference. Run `lumiqot service enable worker` in the `lumiqo`
 user session after configuring the Worker. Automatic updates and explicit
 reconciliation work with the Worker disabled.
 
+Manager provisions `gh` from the signed GitHub CLI apt repository at
+`cli.github.com`. Existing installations that lack `gh api --slurp` are
+upgraded during reconciliation. GitHub CLI sign-in data stays in the user's
+home directory.
+
 ## Package installation and recovery
 
 The root-owned layout keeps release files immutable to the service account:
