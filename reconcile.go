@@ -6,31 +6,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 )
 
 const componentHistoryPath = "/var/lib/lumiqo/manager/installed-components.json"
+const hushLoginPath = "/home/lumiqo/.hushlogin"
 
 type installedComponents map[string]bool
 
-var optionalRepositories = []struct {
-	name    string
-	inspect func(bool, io.Reader, io.Writer) (component, error)
-}{
-	{workerRepo, inspectWorker},
-}
-
 func installOptional(repo string, stdin io.Reader, stderr io.Writer) (reconcileReport, error) {
-	for _, optional := range optionalRepositories {
-		if optional.name == repo {
-			if os.Geteuid() != 0 {
-				return reconcileReport{}, errors.New("install requires root")
-			}
-			return reconcile(true, false, repo, stdin, stderr)
-		}
+	if repo != distributionRepo {
+		return reconcileReport{}, fmt.Errorf("unsupported optional repository %q", repo)
 	}
-	return reconcileReport{}, fmt.Errorf("unsupported optional repository %q", repo)
+	if os.Geteuid() != 0 {
+		return reconcileReport{}, errors.New("install requires root")
+	}
+	return reconcile(true, false, repo, stdin, stderr)
 }
 
 type component struct {
@@ -40,18 +33,21 @@ type component struct {
 	present, ready                bool
 	missingPackages               []string
 	install                       func() error
+	action                        string
+	distribution                  *distributionReport
 }
 
 type componentDifference struct {
-	Name                string   `json:"name"`
-	Policy              string   `json:"policy"`
-	Present             bool     `json:"present"`
-	Ready               bool     `json:"ready"`
-	PreviouslyInstalled bool     `json:"previously_installed"`
-	Action              string   `json:"action"`
-	MissingPackages     []string `json:"missing_packages,omitempty"`
-	CurrentVersion      string   `json:"current_version,omitempty"`
-	TargetVersion       string   `json:"target_version,omitempty"`
+	Name                string              `json:"name"`
+	Policy              string              `json:"policy"`
+	Present             bool                `json:"present"`
+	Ready               bool                `json:"ready"`
+	PreviouslyInstalled bool                `json:"previously_installed"`
+	Action              string              `json:"action"`
+	MissingPackages     []string            `json:"missing_packages,omitempty"`
+	CurrentVersion      string              `json:"current_version,omitempty"`
+	TargetVersion       string              `json:"target_version,omitempty"`
+	Distribution        *distributionReport `json:"distribution,omitempty"`
 }
 
 type reconcileReport struct {
@@ -65,27 +61,31 @@ func reconcile(apply, restore bool, repo string, stdin io.Reader, stderr io.Writ
 		aptMissing := missingPackages()
 		_, envErr := os.Stat(environmentRoot + "/current")
 		envReady := managedEnvironmentReady()
+		hushLogin, hushErr := os.Stat(hushLoginPath)
 		components := []component{
 			{name: "apt", policy: "required", present: len(aptMissing) == 0, ready: len(aptMissing) == 0, missingPackages: aptMissing, install: func() error {
 				_, err := setup(true, stdin, stderr)
 				return err
 			}},
+			{name: "hushlogin", policy: "required", present: hushErr == nil, ready: hushErr == nil && hushLogin.Mode().IsRegular(), install: func() error {
+				cmd := exec.Command("/usr/sbin/runuser", "-u", "lumiqo", "--", "/bin/sh", "-ec",
+					`[ -f "$1" ] || (set -C; : > "$1")`, "sh", hushLoginPath)
+				cmd.Stderr = stderr
+				return cmd.Run()
+			}},
 			{name: "environment", policy: "recommended", present: envErr == nil || envReady, ready: envReady, install: func() error {
 				return provisionEnvironment(stderr)
 			}},
 		}
-		for _, optional := range optionalRepositories {
-			c, err := optional.inspect(repo == optional.name, stdin, stderr)
-			if err != nil {
-				if !apply || repo == optional.name {
-					return reconcileReport{}, err
-				}
-				// Apply mandatory repairs before reporting an optional update failure.
-				c.selected = true
-				c.install = func() error { return err }
+		c, err := inspectDistribution(repo == distributionRepo, apply)
+		if err != nil {
+			if !apply {
+				return reconcileReport{}, err
 			}
-			components = append(components, c)
+			c.selected = true
+			c.install = func() error { return err }
 		}
+		components = append(components, c)
 		report := planComponents(components, history, restore)
 		if !apply {
 			return report, nil
@@ -112,13 +112,15 @@ func planComponents(components []component, history installedComponents, restore
 			action = "skip_optional"
 		case c.policy == "recommended" && !c.present && history[c.name] && !restore:
 			action = "skip_previously_installed"
+		case c.action != "":
+			action = c.action
 		default:
 			action = "install"
 		}
 		report.Components = append(report.Components, componentDifference{
 			Name: c.name, Policy: c.policy, Present: c.present, Ready: c.ready,
 			PreviouslyInstalled: history[c.name], Action: action, MissingPackages: c.missingPackages,
-			CurrentVersion: c.currentVersion, TargetVersion: c.targetVersion,
+			CurrentVersion: c.currentVersion, TargetVersion: c.targetVersion, Distribution: c.distribution,
 		})
 	}
 	return report
@@ -127,13 +129,15 @@ func planComponents(components []component, history installedComponents, restore
 func applyComponents(report reconcileReport, components []component, history installedComponents, save func() error) (reconcileReport, error) {
 	for i, c := range components {
 		switch report.Components[i].Action {
-		case "install":
+		case "install", "repair", "update", "recover":
 			if err := c.install(); err != nil {
 				return report, fmt.Errorf("reconcile %s: %w", c.name, err)
 			}
 			report.Applied = append(report.Applied, c.name)
+			if report.Components[i].Action == "recover" && c.distribution.Pending.Old == "" && !history[c.name] {
+				continue
+			}
 		case "none":
-			// Adopt healthy installations created before history tracking was introduced.
 		default:
 			continue
 		}

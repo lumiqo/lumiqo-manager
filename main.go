@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -21,21 +20,21 @@ var version = "dev"
 
 const usage = `Usage: lumiqo-manager <command> [options]
 
-  status                 Report OS, WSL, tools and Worker state
+  status                 Report OS, WSL, tools and distribution state
   doctor [--json]        Check Ubuntu, systemd and setup prerequisites
   tools list [--json]    Report which supported tools are installed
-  worker status          Report the Worker systemd unit
   setup [--plan|--apply]        Check prerequisites, optionally install missing apt packages
-  install REPO           Install an optional component (lumiqo-worker)
+  install lumiqot-linux  Install the optional Lumiqot distribution
+  rollback               Activate the retained previous package
   reconcile --plan       Report environment differences as JSON
   reconcile --apply [--restore]
                          Repair the environment and update installed components
   auth                   Report sign-in state for supported CLI tools
   auth --login TOOL      Start interactive sign-in (gh, ntn, gcloud, codex)
-  services [--user]      Report the Worker systemd unit
+  services               Report desired state, runtime status and health
   version                Report the Manager version
 
-Reports are JSON. --unit selects the Worker unit for status and services.
+Reports are JSON.
 `
 
 type systemInfo struct {
@@ -44,17 +43,6 @@ type systemInfo struct {
 	Distro  string `json:"distro"`
 	Release string `json:"release"`
 	WSL     bool   `json:"wsl"`
-}
-
-type service struct {
-	Unit          string `json:"unit"`
-	Scope         string `json:"scope"`
-	Load          string `json:"load"`
-	Active        string `json:"active"`
-	Sub           string `json:"sub"`
-	UnitFileState string `json:"-"`
-	MainPID       int    `json:"-"`
-	Error         string `json:"error,omitempty"`
 }
 
 type tool struct {
@@ -71,7 +59,7 @@ var authTools = []tool{
 }
 
 var packages = []string{
-	"7zip", "bat", "build-essential", "ca-certificates", "csvkit", "curl",
+	"7zip", "bat", "bubblewrap", "build-essential", "ca-certificates", "csvkit", "curl",
 	"fd-find", "ffmpeg", "file", "gh", "git", "git-lfs", "gpg", "imagemagick",
 	"jq", "libimage-exiftool-perl", "miller", "pandoc", "poppler-utils",
 	"python3", "python3-venv", "ripgrep", "rsync", "shellcheck", "sqlite3",
@@ -110,36 +98,6 @@ func probe(name string, args ...string) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 	return output, err
-}
-
-func worker(unit string, user bool) service {
-	state := service{Unit: unit, Scope: "system", Load: "unknown", Active: "unknown", Sub: "unknown"}
-	var args []string
-	if user {
-		args = append(args, "--user")
-		state.Scope = "user"
-	}
-	args = append(args, "show", "--property=LoadState,ActiveState,SubState,UnitFileState,MainPID", "--", unit)
-	output, err := probe("systemctl", args...)
-	for _, line := range strings.Split(string(output), "\n") {
-		key, value, _ := strings.Cut(line, "=")
-		switch key {
-		case "LoadState":
-			state.Load = value
-		case "ActiveState":
-			state.Active = value
-		case "MainPID":
-			state.MainPID, _ = strconv.Atoi(value)
-		case "UnitFileState":
-			state.UnitFileState = value
-		case "SubState":
-			state.Sub = value
-		}
-	}
-	if err != nil && state.Load == "unknown" {
-		state.Error = "systemd query failed: " + err.Error()
-	}
-	return state
 }
 
 func installed(name string) bool {
@@ -216,7 +174,7 @@ func installedTools() map[string]bool {
 	return tools
 }
 
-func doctor(unit string, user bool) any {
+func doctor() any {
 	info := host()
 	systemd, err := os.ReadFile("/proc/1/comm")
 	return map[string]any{
@@ -225,7 +183,6 @@ func doctor(unit string, user bool) any {
 		"systemd":          err == nil && strings.TrimSpace(string(systemd)) == "systemd",
 		"missing_packages": missingPackages(),
 		"tools":            installedTools(),
-		"worker":           worker(unit, user),
 		"environment":      environmentHealth(),
 	}
 }
@@ -238,8 +195,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	command := args[0]
 	options := args[1:]
 	switch command {
-	case "tools", "worker":
-		subcommand := map[string]string{"tools": "list", "worker": "status"}[command]
+	case "tools":
+		subcommand := "list"
 		if len(options) == 0 || options[0] != subcommand {
 			return fmt.Errorf("expected %s %s", command, subcommand)
 		}
@@ -248,16 +205,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	switch command {
-	case "status", "services", "doctor", "worker", "tools", "setup":
+	case "status", "services", "doctor", "tools", "setup":
 		flags.Bool("json", false, "emit JSON (default)")
 	}
-	var unit, login string
-	var apply, plan, user, restore bool
+	var login string
+	var apply, plan, restore bool
 	switch command {
-	case "status", "services", "doctor", "worker":
-		flags.StringVar(&unit, "unit", "lumiqo-worker.service", "Worker systemd unit")
-		flags.BoolVar(&user, "user", false, "query the user systemd manager")
-	case "tools":
+	case "status", "services", "doctor", "tools":
 	case "setup":
 		flags.BoolVar(&plan, "plan", false, "report missing apt packages without installing")
 		flags.BoolVar(&apply, "apply", false, "install missing apt packages")
@@ -268,8 +222,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "auth":
 		flags.StringVar(&login, "login", "", "start interactive sign-in for TOOL")
 	case "install":
-		flags.Usage = func() { fmt.Fprintln(stderr, "Usage: lumiqo-manager install REPO (supported: lumiqo-worker)") }
-	case "version":
+		flags.Usage = func() { fmt.Fprintln(stderr, "Usage: lumiqo-manager install lumiqot-linux") }
+	case "version", "rollback":
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -281,7 +235,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	if command == "install" {
 		if flags.NArg() != 1 {
-			return errors.New("expected install REPO (supported: lumiqo-worker)")
+			return errors.New("expected install lumiqot-linux")
 		}
 		report, err := installOptional(flags.Arg(0), stdin, stderr)
 		if err != nil {
@@ -295,12 +249,26 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	var result any
 	switch command {
-	case "status":
-		result = map[string]any{"version": version, "system": host(), "tools": installedTools(), "worker": worker(unit, user), "worker_configured": workerConfigured()}
-	case "services", "worker":
-		result = worker(unit, user)
+	case "status", "services":
+		distribution, err := managedDistribution().report()
+		if err != nil {
+			return err
+		}
+		result = distribution
+		if command == "status" {
+			result = map[string]any{"version": version, "system": host(), "tools": installedTools(), "distribution": distribution}
+		}
 	case "doctor":
-		result = doctor(unit, user)
+		result = doctor()
+	case "rollback":
+		if err := rollbackDistribution(); err != nil {
+			return err
+		}
+		report, err := managedDistribution().report()
+		if err != nil {
+			return err
+		}
+		result = report
 	case "tools":
 		result = installedTools()
 	case "reconcile":

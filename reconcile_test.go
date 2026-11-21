@@ -18,19 +18,19 @@ func TestReconcileComponentPolicy(t *testing.T) {
 		{name: "removed", policy: "recommended"},
 		{name: "damaged", policy: "recommended", present: true},
 		{name: "healthy", policy: "recommended", present: true, ready: true},
-		{name: "worker", policy: "optional"},
+		{name: "distribution", policy: "optional"},
 	}
-	history := installedComponents{"apt": true, "removed": true, "damaged": true, "worker": true}
+	history := installedComponents{"apt": true, "removed": true, "damaged": true, "distribution": true}
 	for _, tc := range []struct {
-		restore, worker   bool
-		removed, optional string
+		restore, distribution bool
+		removed, optional     string
 	}{
 		{false, false, "skip_previously_installed", "skip_optional"},
 		{true, false, "install", "skip_optional"},
 		{false, true, "skip_previously_installed", "install"},
 		{true, true, "install", "install"},
 	} {
-		components[5].selected = tc.worker
+		components[5].selected = tc.distribution
 		report := planComponents(components, history, tc.restore)
 		var got []string
 		for _, diff := range report.Components {
@@ -38,23 +38,23 @@ func TestReconcileComponentPolicy(t *testing.T) {
 		}
 		want := []string{"install", "install", tc.removed, "install", "none", tc.optional}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("restore=%v worker=%v: actions %v, want %v", tc.restore, tc.worker, got, want)
+			t.Errorf("restore=%v distribution=%v: actions %v, want %v", tc.restore, tc.distribution, got, want)
 		}
 	}
 }
 
-func TestReconcileUpdatesPreviouslyInstalledWorker(t *testing.T) {
-	worker := component{name: "worker", policy: "optional", present: true, currentVersion: "v1.9.0", targetVersion: "v1.10.0"}
+func TestReconcileUpdatesPreviouslyInstalledDistribution(t *testing.T) {
+	distribution := component{name: "distribution", policy: "optional", present: true, currentVersion: "v1.9.0", targetVersion: "v1.10.0"}
 	history := installedComponents{}
-	report := planComponents([]component{worker}, history, false)
+	report := planComponents([]component{distribution}, history, false)
 	diff := report.Components[0]
 	if diff.Action != "install" || diff.CurrentVersion != "v1.9.0" || diff.TargetVersion != "v1.10.0" {
-		t.Fatalf("unexpected Worker diff: %+v", diff)
+		t.Fatalf("unexpected Distribution diff: %+v", diff)
 	}
-	worker.currentVersion = worker.targetVersion
-	worker.ready = true
-	if got := planComponents([]component{worker}, history, false).Components[0].Action; got != "none" {
-		t.Fatalf("current Worker action = %q", got)
+	distribution.currentVersion = distribution.targetVersion
+	distribution.ready = true
+	if got := planComponents([]component{distribution}, history, false).Components[0].Action; got != "none" {
+		t.Fatalf("current Distribution action = %q", got)
 	}
 }
 
@@ -125,32 +125,15 @@ func TestReconcilePlanCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var report reconcileReport
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || len(report.Components) != 3 || len(report.Applied) != 0 {
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || len(report.Components) != 4 || len(report.Applied) != 0 {
 		t.Fatalf("unexpected plan %q, err = %v", stdout.String(), err)
+	}
+	if diff := report.Components[1]; diff.Name != "hushlogin" || diff.Policy != "required" {
+		t.Fatalf("unexpected login configuration in plan: %+v", diff)
 	}
 	for _, args := range [][]string{{}, {"--plan", "--apply"}, {"--plan", "--restore"}, {"--restore"}} {
 		if err := run(append([]string{"reconcile"}, args...), nil, io.Discard, io.Discard); err == nil {
 			t.Errorf("accepted invalid options %v", args)
 		}
-	}
-}
-
-func TestInstallWorkerUnitPreservesExistingFiles(t *testing.T) {
-	path := filepath.Join(t.TempDir(), workerUnit)
-	if err := installWorkerUnit(path); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != unitContents {
-		t.Fatalf("new unit = %q, err = %v", data, err)
-	}
-	const custom = "[Service]\nEnvironment=EXAMPLE=custom\n"
-	if err := os.WriteFile(path, []byte(custom), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := installWorkerUnit(path); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != custom {
-		t.Fatalf("existing unit = %q, err = %v", data, err)
 	}
 }
