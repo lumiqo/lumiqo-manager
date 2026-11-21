@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,7 @@ import (
 	"strings"
 )
 
-const distributionReleaseAPI = "https://api.github.com/repos/lumiqo/lumiqot-linux/releases/latest"
+const distributionLatestRelease = "https://github.com/lumiqo/lumiqot-linux/releases/latest"
 const distributionReleaseAssets = "https://github.com/lumiqo/lumiqot-linux/releases/download"
 
 var stableDistributionTag = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -25,23 +24,32 @@ func latestDistributionRelease(client *http.Client, endpoint, assets, arch strin
 	if arch != "amd64" && arch != "arm64" {
 		return distributionRelease{}, fmt.Errorf("unsupported Distribution architecture %s", arch)
 	}
-	body, err := openDistributionDownload(client, endpoint)
+	redirectClient := *client
+	redirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := redirectClient.Get(endpoint)
 	if err != nil {
 		return distributionRelease{}, err
 	}
-	defer body.Close()
-	var metadata struct {
-		Tag        string `json:"tag_name"`
-		Draft      bool   `json:"draft"`
-		Prerelease bool   `json:"prerelease"`
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return distributionRelease{}, fmt.Errorf("fetch latest Distribution release from %s: expected redirect, got %s", endpoint, response.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(body, 1<<20)).Decode(&metadata); err != nil {
-		return distributionRelease{}, fmt.Errorf("decode Distribution release: %w", err)
+	target, err := response.Location()
+	if err != nil {
+		return distributionRelease{}, fmt.Errorf("read Distribution release redirect: %w", err)
 	}
-	if metadata.Draft || metadata.Prerelease || !stableDistributionTag.MatchString(metadata.Tag) {
-		return distributionRelease{}, fmt.Errorf("unexpected stable Distribution release %q", metadata.Tag)
+	source := response.Request.URL
+	prefix := strings.TrimSuffix(source.Path, "/latest") + "/tag/"
+	tag, found := strings.CutPrefix(target.Path, prefix)
+	if target.Scheme != source.Scheme || target.Host != source.Host || target.User != nil ||
+		!found || !stableDistributionTag.MatchString(tag) {
+		return distributionRelease{}, errors.New("unexpected Distribution release redirect")
 	}
-	return distributionRelease{tag: metadata.Tag, arch: arch, assets: assets, client: client}, nil
+	return distributionRelease{tag: tag, arch: arch, assets: assets, client: client}, nil
 }
 
 func distributionVersionNewer(candidate, current string) bool {

@@ -128,8 +128,8 @@ func releaseFixture(t *testing.T, tag string, badDigest bool) distributionReleas
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/latest":
-			fmt.Fprintf(w, `{"tag_name":%q}`, tag)
+		case "/releases/latest":
+			http.Redirect(w, r, "/releases/tag/"+tag, http.StatusFound)
 		case "/" + tag + "/" + name:
 			_, _ = w.Write(archive)
 		case "/" + tag + "/lumiqot-linux-" + tag + "-SHA256SUMS":
@@ -139,7 +139,7 @@ func releaseFixture(t *testing.T, tag string, badDigest bool) distributionReleas
 		}
 	}))
 	t.Cleanup(server.Close)
-	release, err := latestDistributionRelease(server.Client(), server.URL+"/latest", server.URL, "amd64")
+	release, err := latestDistributionRelease(server.Client(), server.URL+"/releases/latest", server.URL, "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}

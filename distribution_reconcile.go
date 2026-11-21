@@ -70,7 +70,7 @@ func inspectDistribution(selected, apply bool) (component, error) {
 	}
 
 	release, releaseErr := latestDistributionRelease(&http.Client{Timeout: 2 * time.Minute},
-		distributionReleaseAPI, distributionReleaseAssets, store.arch)
+		distributionLatestRelease, distributionReleaseAssets, store.arch)
 	report.TargetVersion = release.tag
 	c.currentVersion, c.targetVersion = report.InstalledVersion, report.TargetVersion
 	if releaseErr != nil {
