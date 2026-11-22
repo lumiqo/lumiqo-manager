@@ -454,3 +454,40 @@ func TestDisabledDistributionInstallUpdateRollbackAndRecovery(t *testing.T) {
 	}
 	f.expect(t, "v1.0.0", "v1.1.0 drain", "v1.1.0 stop", "v1.0.0 start", "v1.0.0 status")
 }
+
+func TestStageLocalDistributionWithInstalledVersion(t *testing.T) {
+	const tag = "v1.0.0"
+	f := newFakeLifecycle(t)
+	original := f.mustApply(t, tag)
+	data := makeArchive(t, testManifest(tag), validEntries)
+	err := f.store.locked(func(s distributionStore) error {
+		if _, err := s.stageLocal(tag, bytes.NewReader(data), strings.Repeat("0", 64)); err == nil {
+			return errors.New("local archive with an incorrect checksum was accepted")
+		}
+		target, err := s.stageLocal(tag, bytes.NewReader(data), fmt.Sprintf("%x", sha256.Sum256(data)))
+		if err != nil {
+			return err
+		}
+		if target == original {
+			return errors.New("staging reused the active installation directory")
+		}
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.activate(state, original, target, false)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := f.store.state()
+	if err != nil || state.Previous != original || f.running == original {
+		t.Fatalf("state=%+v running=%q err=%v", state, f.running, err)
+	}
+	if err := f.store.locked(func(s distributionStore) error { return s.rollback() }); err != nil {
+		t.Fatal(err)
+	}
+	if f.running != original {
+		t.Fatalf("rollback started %q, want %q", f.running, original)
+	}
+}

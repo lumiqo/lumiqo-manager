@@ -310,6 +310,10 @@ func (r distributionRelease) stage(root string) error {
 		return err
 	}
 	defer response.Close()
+	return r.stageArchive(root, response, digest)
+}
+
+func (r distributionRelease) stageArchive(root string, source io.Reader, digest string) error {
 	archive, err := os.CreateTemp(filepath.Dir(root), ".download-")
 	if err != nil {
 		return err
@@ -320,7 +324,7 @@ func (r distributionRelease) stage(root string) error {
 		return err
 	}
 	hash := sha256.New()
-	n, err := io.Copy(io.MultiWriter(archive, hash), io.LimitReader(response, maxArchive+1))
+	n, err := io.Copy(io.MultiWriter(archive, hash), io.LimitReader(source, maxArchive+1))
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -406,12 +407,23 @@ func (s distributionStore) cleanup(current, previous string) error {
 }
 
 func (s distributionStore) stage(release distributionRelease) (string, error) {
+	return s.stagePackage(release.tag, release.stage)
+}
+
+func (s distributionStore) stageLocal(tag string, source io.Reader, digest string) (string, error) {
+	release := distributionRelease{tag: tag, arch: s.arch}
+	return s.stagePackage(tag, func(root string) error {
+		return release.stageArchive(root, source, digest)
+	})
+}
+
+func (s distributionStore) stagePackage(tag string, unpack func(string) error) (string, error) {
 	stage, err := os.MkdirTemp(filepath.Join(s.root, "versions"), ".stage-")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(stage)
-	if err := release.stage(stage); err != nil {
+	if err := unpack(stage); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(stage, 0755); err != nil {
@@ -420,7 +432,7 @@ func (s distributionStore) stage(release distributionRelease) (string, error) {
 	if err := syncDirectory(stage); err != nil {
 		return "", err
 	}
-	id := release.tag + "-" + strings.TrimPrefix(filepath.Base(stage), ".stage-")
+	id := tag + "-" + strings.TrimPrefix(filepath.Base(stage), ".stage-")
 	destination := s.versionDir(id)
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("staged destination unavailable: %s", destination)
@@ -431,12 +443,12 @@ func (s distributionStore) stage(release distributionRelease) (string, error) {
 	if err := syncDirectory(filepath.Dir(destination)); err != nil {
 		return "", err
 	}
-	if err := verifyDistribution(destination, release.tag, s.arch, false); err != nil {
+	if err := verifyDistribution(destination, tag, s.arch, false); err != nil {
 		return "", errors.Join(err, os.RemoveAll(destination))
 	}
 	out, err := s.invoke(id, "version", 8)
-	if err != nil || strings.TrimSpace(string(out)) != release.tag {
-		return "", errors.Join(fmt.Errorf("staged CLI did not report package version %s", release.tag), err, os.RemoveAll(destination))
+	if err != nil || strings.TrimSpace(string(out)) != tag {
+		return "", errors.Join(fmt.Errorf("staged CLI did not report package version %s", tag), err, os.RemoveAll(destination))
 	}
 	return id, nil
 }

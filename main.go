@@ -215,7 +215,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "status", "services", "doctor", "tools", "setup":
 		flags.Bool("json", false, "emit JSON (default)")
 	}
-	var login string
+	var login, archiveVersion, archiveHash string
 	var apply, plan, restore bool
 	switch command {
 	case "status", "services", "doctor", "tools":
@@ -229,7 +229,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	case "auth":
 		flags.StringVar(&login, "login", "", "start interactive sign-in for TOOL")
 	case "install":
-		flags.Usage = func() { fmt.Fprintln(stderr, "Usage: lumiqo-manager install lumiqot-linux") }
+		flags.StringVar(&archiveVersion, "archive-version", "", "install a local archive from stdin with this version")
+		flags.StringVar(&archiveHash, "archive-sha256", "", "expected SHA-256 of the local archive")
+		flags.Usage = func() {
+			fmt.Fprintln(stderr, "Usage: lumiqo-manager install [--archive-version VERSION --archive-sha256 HASH] lumiqot-linux")
+		}
 	case "version", "rollback":
 	default:
 		return fmt.Errorf("unknown command %q", command)
@@ -243,6 +247,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if command == "install" {
 		if flags.NArg() != 1 {
 			return errors.New("expected install lumiqot-linux")
+		}
+		if archiveVersion != "" || archiveHash != "" {
+			if flags.Arg(0) != distributionRepo {
+				return errors.New("local archive requires lumiqot-linux")
+			}
+			report, err := installLocalDistribution(archiveVersion, archiveHash, stdin)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(stdout).Encode(report)
 		}
 		report, err := installOptional(flags.Arg(0), stdin, stderr)
 		if err != nil {
