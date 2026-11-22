@@ -8,7 +8,7 @@ lifecycle interface and dispatches every call as the `lumiqo` service account.
 ## Clean installation
 
 Use Ubuntu 24.04 with systemd and an existing `lumiqo` account. Prepare the
-Worker's credentials and `~lumiqo/.config/lumiqo/worker.json` before enabling
+Worker's credentials and `~lumiqo/.config/lumiqot/worker.json` before enabling
 the Worker. Use an absolute `state_dir` outside the package tree. The package
 can be installed before this configuration:
 
