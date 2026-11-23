@@ -141,6 +141,20 @@ func missingAptPackages(requested []string) []string {
 }
 
 func setup(apply bool, stdin io.Reader, stderr io.Writer, extra ...string) (any, error) {
+	report, err := setupHostAPT(apply, stdin, stderr, extra...)
+	if err != nil {
+		return nil, err
+	}
+	if apply {
+		if err := installGoogleCloudCLI(stdin, stderr); err != nil {
+			return nil, err
+		}
+	}
+	report["google_cloud_cli_ready"] = googleCloudCLIReady()
+	return report, nil
+}
+
+func setupHostAPT(apply bool, stdin io.Reader, stderr io.Writer, extra ...string) (map[string]any, error) {
 	info := host()
 	if info.Distro != "ubuntu" || info.Release != "24.04" {
 		return nil, errors.New("setup requires Ubuntu 24.04")

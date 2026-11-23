@@ -33,6 +33,11 @@ Manager provisions `gh` from the signed GitHub CLI apt repository at
 upgraded during reconciliation. GitHub CLI sign-in data stays in the user's
 home directory.
 
+Manager installs Google Cloud CLI (`gcloud`) from Google's signed
+`cloud-sdk` APT repository at `packages.cloud.google.com`. Every
+`setup --apply` or `reconcile --apply` refreshes the package index and
+installs the latest available `google-cloud-cli` package.
+
 ## Package installation and recovery
 
 The root-owned layout keeps release files immutable to the service account:

@@ -60,13 +60,24 @@ func reconcile(apply, restore bool, repo string, stdin io.Reader, stderr io.Writ
 	run := func(history installedComponents, save func() error) (reconcileReport, error) {
 		aptMissing := missingPackages()
 		aptReady := len(aptMissing) == 0 && githubCLIReady()
+		gcloudMissing := missingAptPackages([]string{googleCloudCLIPackage})
+		gcloudReady := len(gcloudMissing) == 0 && googleCloudCLIConfigured()
+		gcloudAction := "install"
+		if gcloudReady {
+			gcloudAction = "update"
+		} else if len(gcloudMissing) == 0 {
+			gcloudAction = "repair"
+		}
 		_, envErr := os.Stat(environmentRoot + "/current")
 		envReady := managedEnvironmentReady()
 		hushLogin, hushErr := os.Stat(hushLoginPath)
 		components := []component{
 			{name: "apt", policy: "required", present: len(aptMissing) == 0, ready: aptReady, missingPackages: aptMissing, install: func() error {
-				_, err := setup(true, stdin, stderr)
+				_, err := setupHostAPT(true, stdin, stderr)
 				return err
+			}},
+			{name: "gcloud", policy: "required", present: len(gcloudMissing) == 0, ready: gcloudReady, action: gcloudAction, missingPackages: gcloudMissing, install: func() error {
+				return installGoogleCloudCLI(stdin, stderr)
 			}},
 			{name: "hushlogin", policy: "required", present: hushErr == nil, ready: hushErr == nil && hushLogin.Mode().IsRegular(), install: func() error {
 				cmd := exec.Command("/usr/sbin/runuser", "-u", "lumiqo", "--", "/bin/sh", "-ec",
@@ -108,7 +119,7 @@ func planComponents(components []component, history installedComponents, restore
 	for _, c := range components {
 		action := "none"
 		switch {
-		case c.ready:
+		case c.ready && c.action == "":
 		case c.policy == "optional" && !c.present && !c.selected:
 			action = "skip_optional"
 		case c.policy == "recommended" && !c.present && history[c.name] && !restore:

@@ -125,10 +125,13 @@ func TestReconcilePlanCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var report reconcileReport
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || len(report.Components) != 4 || len(report.Applied) != 0 {
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || len(report.Components) != 5 || len(report.Applied) != 0 {
 		t.Fatalf("unexpected plan %q, err = %v", stdout.String(), err)
 	}
-	if diff := report.Components[1]; diff.Name != "hushlogin" || diff.Policy != "required" {
+	if diff := report.Components[1]; diff.Name != "gcloud" || diff.Policy != "required" || diff.Action != "install" {
+		t.Fatalf("unexpected Google Cloud CLI in plan: %+v", diff)
+	}
+	if diff := report.Components[2]; diff.Name != "hushlogin" || diff.Policy != "required" {
 		t.Fatalf("unexpected login configuration in plan: %+v", diff)
 	}
 	for _, args := range [][]string{{}, {"--plan", "--apply"}, {"--plan", "--restore"}, {"--restore"}} {
