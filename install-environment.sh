@@ -152,12 +152,13 @@ for name in uv mise duckdb node npm npx python-analysis fd bat; do
     fi
 done
 runuser -u lumiqo -- /bin/sh -eu -s -- "$root" <<'SH'
-    mkdir -p /home/lumiqo/docs /home/lumiqo/.venvs
+    docs_dir=/home/lumiqo/.local/share/lumiqot/docs
+    mkdir -p "$docs_dir" /home/lumiqo/.venvs
     link_if_missing() {
         if [ ! -e "$2" ] && [ ! -L "$2" ]; then
             ln -sT "$1" "$2"
         fi
     }
-    link_if_missing "$1/current/ENVIRONMENT.md" /home/lumiqo/docs/ENVIRONMENT.md
+    link_if_missing "$1/current/ENVIRONMENT.md" "$docs_dir/ENVIRONMENT.md"
     link_if_missing "$1/current/analysis" /home/lumiqo/.venvs/analysis
 SH

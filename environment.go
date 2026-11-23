@@ -52,7 +52,7 @@ func managedEnvironmentReady() bool {
 			return false
 		}
 	}
-	for _, path := range []string{"/home/lumiqo/docs/ENVIRONMENT.md", "/home/lumiqo/.venvs/analysis"} {
+	for _, path := range []string{"/home/lumiqo/.local/share/lumiqot/docs/ENVIRONMENT.md", "/home/lumiqo/.venvs/analysis"} {
 		if _, err := os.Lstat(path); err != nil {
 			return false
 		}
